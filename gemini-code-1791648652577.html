@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <title>MP3 to WAV Converter</title>
+</head>
+<body>
+  <h2>แปลงไฟล์ MP3 เป็น WAV</h2>
+  <input type="file" id="upload" accept=".mp3,audio/mp3,audio/mpeg" multiple>
+  <button id="convertBtn">แปลงไฟล์ทั้งหมด</button>
+  <br><br>
+  <p id="status" role="status" aria-live="polite"></p>
+  <div id="downloadList"></div>
+
+  <script>
+    const fileInput = document.getElementById('upload');
+    const convertButton = document.getElementById('convertBtn');
+    const downloadList = document.getElementById('downloadList');
+    const status = document.getElementById('status');
+
+    convertButton.addEventListener('click', async () => {
+      const files = Array.from(fileInput.files);
+      if (!files.length) {
+        status.textContent = 'กรุณาเลือกไฟล์ MP3 อย่างน้อย 1 ไฟล์';
+        return;
+      }
+
+      convertButton.disabled = true;
+      fileInput.disabled = true;
+      downloadList.replaceChildren();
+      let converted = 0;
+      const errors = [];
+
+      try {
+        for (let index = 0; index < files.length; index++) {
+          const file = files[index];
+          let audioCtx;
+
+          try {
+            status.textContent = `กำลังอ่านไฟล์ ${index + 1}/${files.length}: ${file.name} (0%)`;
+            const arrayBuffer = await readFile(file, (percent) => {
+              status.textContent = `กำลังอ่านไฟล์ ${index + 1}/${files.length}: ${file.name} (${percent}%)`;
+            });
+
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) {
+              throw new Error('เบราว์เซอร์นี้ไม่รองรับการแปลงเสียง');
+            }
+
+            status.textContent = `กำลังถอดรหัสไฟล์ ${index + 1}/${files.length}: ${file.name}`;
+            audioCtx = new AudioContextClass();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            status.textContent = `กำลังแปลงไฟล์ ${index + 1}/${files.length}: ${file.name}`;
+            const wavBlob = await audioBufferToWav(audioBuffer);
+            const fileName = file.name.replace(/\.[^/.]+$/, '') + '.wav';
+            addDownloadLink(wavBlob, fileName);
+            converted++;
+          } catch (error) {
+            console.error(`แปลงไฟล์ไม่สำเร็จ: ${file.name}`, error);
+            errors.push(file.name);
+          } finally {
+            if (audioCtx && audioCtx.state !== 'closed') {
+              await audioCtx.close();
+            }
+          }
+        }
+
+        status.textContent = errors.length
+          ? `แปลงสำเร็จ ${converted}/${files.length} ไฟล์; เปิดไม่ได้ ${errors.join(', ')}`
+          : `แปลงสำเร็จ ${converted} ไฟล์`;
+      } finally {
+        convertButton.disabled = false;
+        fileInput.disabled = false;
+      }
+    });
+
+    function readFile(file, onProgress) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onprogress = (event) => {
+          if (event.lengthComputable) {
+            onProgress(Math.floor((event.loaded / event.total) * 100));
+          }
+        };
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error('อ่านไฟล์ไม่สำเร็จ'));
+        reader.onabort = () => reject(new Error('ยกเลิกการอ่านไฟล์'));
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    function addDownloadLink(blob, fileName) {
+      const downloadLink = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      downloadLink.href = url;
+      downloadLink.download = fileName;
+      downloadLink.innerText = 'ดาวน์โหลด: ' + fileName;
+      downloadLink.style.display = 'block';
+      downloadLink.style.marginBottom = '8px';
+      downloadLink.addEventListener('click', () => {
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }, { once: true });
+
+      const wrapper = document.createElement('div');
+      wrapper.appendChild(downloadLink);
+      downloadList.appendChild(wrapper);
+    }
+
+    async function audioBufferToWav(buffer) {
+      const numOfChan = buffer.numberOfChannels;
+      const dataLength = buffer.length * numOfChan * 2;
+      if (dataLength > 0xFFFFFFFF - 36) {
+        throw new Error('ไฟล์ยาวเกินขนาด WAV ที่รองรับ');
+      }
+
+      const header = new ArrayBuffer(44);
+      const view = new DataView(header);
+      const writeString = (offset, value) => {
+        for (let i = 0; i < value.length; i++) {
+          view.setUint8(offset + i, value.charCodeAt(i));
+        }
+      };
+
+      writeString(0, 'RIFF');
+      view.setUint32(4, dataLength + 36, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numOfChan, true);
+      view.setUint32(24, buffer.sampleRate, true);
+      view.setUint32(28, buffer.sampleRate * numOfChan * 2, true);
+      view.setUint16(32, numOfChan * 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, dataLength, true);
+
+      const channels = Array.from(
+        { length: numOfChan },
+        (_, channel) => buffer.getChannelData(channel)
+      );
+      const parts = [header];
+      const framesPerChunk = 131072;
+
+      for (let start = 0; start < buffer.length; start += framesPerChunk) {
+        const frameCount = Math.min(framesPerChunk, buffer.length - start);
+        const samples = new DataView(new ArrayBuffer(frameCount * numOfChan * 2));
+        let position = 0;
+
+        for (let frame = start; frame < start + frameCount; frame++) {
+          for (let channel = 0; channel < numOfChan; channel++) {
+            const sample = Math.max(-1, Math.min(1, channels[channel][frame]));
+            const pcmSample = sample < 0 ? sample * 32768 : sample * 32767;
+            samples.setInt16(position, pcmSample, true);
+            position += 2;
+          }
+        }
+
+        parts.push(samples.buffer);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      return new Blob(parts, { type: 'audio/wav' });
+    }
+  </script>
+</body>
+</html>
